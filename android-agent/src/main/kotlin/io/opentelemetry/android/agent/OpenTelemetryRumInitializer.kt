@@ -63,14 +63,23 @@ object OpenTelemetryRumInitializer {
         cfg.resourceAction(resourceBuilder)
         val resource = resourceBuilder.build()
 
-        return builder
-            .setSessionProvider(createSessionProvider(ctx, cfg))
-            .setResource(resource)
-            .setClock(cfg.clock)
-            .addSpanExporterCustomizer { createSpanExporter(spansEndpoint) }
-            .addLogRecordExporterCustomizer { createLogExporter(logsEndpoints) }
-            .addMetricExporterCustomizer { createMetricExporter(metricsEndpoint) }
-            .build()
+        val rumBuilder =
+            builder
+                .setSessionProvider(createSessionProvider(ctx, cfg))
+                .setResource(resource)
+                .setClock(cfg.clock)
+                .addSpanExporterCustomizer { createSpanExporter(spansEndpoint) }
+                .addLogRecordExporterCustomizer { createLogExporter(logsEndpoints) }
+                .addMetricExporterCustomizer { createMetricExporter(metricsEndpoint) }
+
+        cfg.tracerProviderCustomizers.forEach { customizer ->
+            rumBuilder.addTracerProviderCustomizer { tracerProviderBuilder, _ ->
+                customizer(tracerProviderBuilder)
+                tracerProviderBuilder
+            }
+        }
+
+        return rumBuilder.build()
     }
 
     private fun createSpanExporter(endpoint: HttpEndpointConnectivity): OtlpHttpSpanExporter =

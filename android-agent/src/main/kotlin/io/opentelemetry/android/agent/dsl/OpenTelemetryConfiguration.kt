@@ -13,6 +13,7 @@ import io.opentelemetry.android.instrumentation.AndroidInstrumentationLoader
 import io.opentelemetry.api.common.Attributes
 import io.opentelemetry.sdk.common.Clock
 import io.opentelemetry.sdk.resources.ResourceBuilder
+import io.opentelemetry.sdk.trace.SdkTracerProviderBuilder
 
 /**
  * Type-safe config DSL that controls how OpenTelemetry should behave.
@@ -32,6 +33,7 @@ class OpenTelemetryConfiguration internal constructor(
     internal val sessionConfig = SessionConfiguration()
     internal val instrumentations = InstrumentationConfiguration(rumConfig, instrumentationLoader)
     internal var resourceAction: ResourceBuilder.() -> Unit = {}
+    internal val tracerProviderCustomizers: MutableList<(SdkTracerProviderBuilder) -> Unit> = mutableListOf()
 
     /**
      * Configures how OpenTelemetry should export telemetry over HTTP.
@@ -82,5 +84,14 @@ class OpenTelemetryConfiguration internal constructor(
      */
     fun resource(action: ResourceBuilder.() -> Unit) {
         resourceAction = action
+    }
+
+    /**
+     * Allows customizing the [SdkTracerProviderBuilder] before the SDK is built.
+     * Use this to register [io.opentelemetry.sdk.trace.SpanProcessor]s that need to
+     * intercept spans created early in the app lifecycle (e.g. AppStart).
+     */
+    fun tracerProvider(action: SdkTracerProviderBuilder.() -> Unit) {
+        tracerProviderCustomizers.add(action)
     }
 }
