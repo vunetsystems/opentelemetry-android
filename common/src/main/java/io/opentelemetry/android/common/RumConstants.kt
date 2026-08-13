@@ -20,6 +20,10 @@ object RumConstants {
     @JvmField
     val START_TYPE_KEY: AttributeKey<String> = AttributeKey.stringKey("start.type")
 
+    /** App framework the host application is built with (e.g. native_android, flutter, react_native). */
+    @JvmField
+    val APP_FRAMEWORK_KEY: AttributeKey<String> = AttributeKey.stringKey("app.framework")
+
     @JvmField
     val STORAGE_SPACE_FREE_KEY: AttributeKey<Long> = AttributeKey.longKey("storage.free")
 
@@ -46,6 +50,8 @@ object RumConstants {
         AttributeKey.stringKey("activity.lifecycle.event")
 
     const val FRAGMENT_LIFECYCLE_SPAN_NAME: String = "fragment.lifecycle"
+
+    const val UI_INTERACTION_SPAN_NAME: String = "ui.interaction"
 
     @JvmField
     val FRAGMENT_LIFECYCLE_EVENT_KEY: AttributeKey<String> =
