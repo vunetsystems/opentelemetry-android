@@ -5,10 +5,11 @@
 
 package io.opentelemetry.android
 
+import io.opentelemetry.android.common.RumConstants
 import io.opentelemetry.api.trace.Span
 import io.opentelemetry.api.trace.SpanContext
 import io.opentelemetry.sdk.trace.ReadWriteSpan
-import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * The `app.start` span that is currently in flight, or null when no app start is in
@@ -26,6 +27,12 @@ import java.util.concurrent.TimeUnit
  * [AppStartSpanTracker], which observes every `app.start` span the SDK creates —
  * cold, warm and hot alike, regardless of which instrumentation started it.
  *
+ * A still-recording span is not replaced. Cold start stays open until the first
+ * committed frame, and a warm/hot `app.start` can open in that window (config
+ * change recreating the first activity). Overwriting would point wrappers at the
+ * short warm span; when it ended they would see null while cold was still live.
+ * Warm/hot publish after the previous span has ended or aged out.
+ *
  * Callers must treat null as "startup window closed" and drop the event. Buffering
  * and replaying it later would attach a phase to a span that has already been
  * exported, or to the next startup's span.
@@ -36,45 +43,42 @@ import java.util.concurrent.TimeUnit
  * path.
  */
 object AppStartSpans {
-    /**
-     * Upper bound on how long a published span is trusted, mirroring
-     * `AppStartupTimer.MAX_TIME_TO_UI_INIT`.
-     *
-     * A span that is abandoned rather than ended produces no `onEnd`, so nothing
-     * would ever clear it: `AppStartupTimer` discards its span without ending it
-     * when UI init arrives too late, which is the normal outcome when Android
-     * starts the process in the background and the user opens the app minutes
-     * later. Without this bound, [current] would keep returning a span that will
-     * never be exported, and every wrapper write for the rest of the process would
-     * vanish into it while still looking like a success.
-     *
-     * Startup is bounded by definition, so treating anything open this long as
-     * closed costs nothing real and converts silent loss into a reported drop.
-     */
-    private val MAX_WINDOW_NANOS = TimeUnit.MINUTES.toNanos(1)
-
-    @Volatile
-    private var tracked: ReadWriteSpan? = null
+    private val tracked = AtomicReference<ReadWriteSpan?>()
 
     /**
      * The live `app.start` span, or null when the startup window is closed.
      *
      * Returns null for a span that has already ended — the tracker is notified after
      * the fact, so without this a caller could observe a closed span and write into
-     * it — and for one that has been open beyond [MAX_WINDOW_NANOS].
+     * it — and for one that has been open beyond
+     * [RumConstants.APP_START_MAX_WINDOW_NANOS]. Stale references are dropped so an
+     * abandoned span (never ended) does not pin the `ReadWriteSpan` for the rest of
+     * the process.
      */
     @JvmStatic
     val current: Span?
         get() {
-            val span = tracked ?: return null
-            if (span.hasEnded() || span.latencyNanos > MAX_WINDOW_NANOS) {
+            val span = tracked.get() ?: return null
+            if (!span.isTrusted()) {
+                tracked.compareAndSet(span, null)
                 return null
             }
             return span
         }
 
     internal fun publish(span: ReadWriteSpan) {
-        tracked = span
+        if (!span.isTrusted()) {
+            return
+        }
+        while (true) {
+            val existing = tracked.get()
+            if (existing != null && existing.isTrusted()) {
+                return
+            }
+            if (tracked.compareAndSet(existing, span)) {
+                return
+            }
+        }
     }
 
     /**
@@ -83,12 +87,16 @@ object AppStartSpans {
      * the newer span's window.
      */
     internal fun clearIfTracked(spanContext: SpanContext) {
-        if (tracked?.spanContext == spanContext) {
-            tracked = null
+        val existing = tracked.get() ?: return
+        if (existing.spanContext == spanContext) {
+            tracked.compareAndSet(existing, null)
         }
     }
 
     internal fun clear() {
-        tracked = null
+        tracked.set(null)
     }
+
+    private fun ReadWriteSpan.isTrusted(): Boolean =
+        !hasEnded() && latencyNanos <= RumConstants.APP_START_MAX_WINDOW_NANOS
 }

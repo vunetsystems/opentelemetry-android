@@ -20,6 +20,10 @@ import io.opentelemetry.sdk.trace.SpanProcessor
  * the cold-start span, while `ActivityTracer` opens the warm and hot ones. A
  * processor sees all three, so returning from the background behaves the same as a
  * fresh launch without either class knowing this exists.
+ *
+ * [AppStartSpans.publish] refuses to replace a still-recording span, so a warm
+ * start that opens while cold is waiting on the first frame does not steal the
+ * holder from wrappers.
  */
 internal class AppStartSpanTracker : SpanProcessor {
     override fun onStart(

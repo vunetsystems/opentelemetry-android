@@ -87,6 +87,29 @@ internal class AppStartSpanTrackerTest {
     }
 
     /**
+     * Cold start stays open until the first frame. A warm start that opens in that
+     * window (first activity recreated before TTID) must not steal the holder —
+     * wrappers would otherwise stamp onto the short warm span, then see null while
+     * cold is still recording.
+     */
+    @Test
+    fun `does not overwrite a live span`() {
+        val cold = appStartSpan(SPAN_ID_A)
+        tracker.onStart(context, cold)
+
+        val warm = appStartSpan(SPAN_ID_B)
+        tracker.onStart(context, warm)
+
+        assertThat(AppStartSpans.current).isSameAs(cold)
+
+        tracker.onEnd(endedSpan(SPAN_ID_B))
+        assertThat(AppStartSpans.current).isSameAs(cold)
+
+        tracker.onEnd(endedSpan(SPAN_ID_A))
+        assertThat(AppStartSpans.current).isNull()
+    }
+
+    /**
      * The tracker is notified after the span ends, so a reader can reach the global
      * in between. An ended span silently discards writes, so it must not be handed out.
      */
@@ -97,6 +120,24 @@ internal class AppStartSpanTrackerTest {
         tracker.onStart(context, span)
 
         assertThat(AppStartSpans.current).isNull()
+    }
+
+    /**
+     * The tracker is notified after the span ends, so a reader can reach the global
+     * in between. Dropping the stale reference lets a later start publish.
+     */
+    @Test
+    fun `drops a span that ends after it was published`() {
+        val span = appStartSpan(SPAN_ID_A)
+        tracker.onStart(context, span)
+        every { span.hasEnded() } returns true
+
+        assertThat(AppStartSpans.current).isNull()
+
+        val warm = appStartSpan(SPAN_ID_B)
+        tracker.onStart(context, warm)
+
+        assertThat(AppStartSpans.current).isSameAs(warm)
     }
 
     /**
@@ -117,6 +158,21 @@ internal class AppStartSpanTrackerTest {
         tracker.onStart(context, span)
 
         assertThat(AppStartSpans.current).isNull()
+    }
+
+    /** Observing an abandoned span must drop it so a later start can publish. */
+    @Test
+    fun `a later start publishes after an abandoned span is observed`() {
+        tracker.onStart(
+            context,
+            appStartSpan(SPAN_ID_A, latencyNanos = TimeUnit.MINUTES.toNanos(5)),
+        )
+        assertThat(AppStartSpans.current).isNull()
+
+        val warm = appStartSpan(SPAN_ID_B)
+        tracker.onStart(context, warm)
+
+        assertThat(AppStartSpans.current).isSameAs(warm)
     }
 
     @Test
