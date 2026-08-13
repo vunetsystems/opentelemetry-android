@@ -18,6 +18,7 @@ import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
+import java.util.concurrent.TimeUnit
 
 internal class AppStartSpanTrackerTest {
     private val tracker = AppStartSpanTracker()
@@ -26,7 +27,7 @@ internal class AppStartSpanTrackerTest {
     @BeforeEach
     @AfterEach
     fun reset() {
-        AppStartSpans.current = null
+        AppStartSpans.clear()
     }
 
     @Test
@@ -53,7 +54,7 @@ internal class AppStartSpanTrackerTest {
         val span = appStartSpan(SPAN_ID_A)
         tracker.onStart(context, span)
 
-        tracker.onEnd(endedSpan(RumConstants.APP_START_SPAN_NAME, SPAN_ID_A))
+        tracker.onEnd(endedSpan(SPAN_ID_A))
 
         assertThat(AppStartSpans.current).isNull()
     }
@@ -67,7 +68,7 @@ internal class AppStartSpanTrackerTest {
         val live = appStartSpan(SPAN_ID_B)
         tracker.onStart(context, live)
 
-        tracker.onEnd(endedSpan(RumConstants.APP_START_SPAN_NAME, SPAN_ID_A))
+        tracker.onEnd(endedSpan(SPAN_ID_A))
 
         assertThat(AppStartSpans.current).isSameAs(live)
     }
@@ -77,7 +78,7 @@ internal class AppStartSpanTrackerTest {
     fun `tracks a later app start span, covering warm and hot starts`() {
         val cold = appStartSpan(SPAN_ID_A)
         tracker.onStart(context, cold)
-        tracker.onEnd(endedSpan(RumConstants.APP_START_SPAN_NAME, SPAN_ID_A))
+        tracker.onEnd(endedSpan(SPAN_ID_A))
 
         val warm = appStartSpan(SPAN_ID_B)
         tracker.onStart(context, warm)
@@ -85,19 +86,67 @@ internal class AppStartSpanTrackerTest {
         assertThat(AppStartSpans.current).isSameAs(warm)
     }
 
-    private fun appStartSpan(spanId: String): ReadWriteSpan {
+    /**
+     * The tracker is notified after the span ends, so a reader can reach the global
+     * in between. An ended span silently discards writes, so it must not be handed out.
+     */
+    @Test
+    fun `hides a span that has already ended`() {
+        val span = appStartSpan(SPAN_ID_A, hasEnded = true)
+
+        tracker.onStart(context, span)
+
+        assertThat(AppStartSpans.current).isNull()
+    }
+
+    /**
+     * AppStartupTimer discards its span without ending it when UI init arrives too
+     * late — the normal outcome when Android starts the process in the background and
+     * the user opens the app minutes later. No end means no onEnd, so nothing would
+     * ever clear this; without the age bound the stale span would swallow every
+     * wrapper write for the rest of the process while still looking like a success.
+     */
+    @Test
+    fun `hides a span abandoned without ending`() {
+        val span =
+            appStartSpan(
+                SPAN_ID_A,
+                latencyNanos = TimeUnit.MINUTES.toNanos(5),
+            )
+
+        tracker.onStart(context, span)
+
+        assertThat(AppStartSpans.current).isNull()
+    }
+
+    @Test
+    fun `keeps a span inside the startup window`() {
+        val span =
+            appStartSpan(
+                SPAN_ID_A,
+                latencyNanos = TimeUnit.SECONDS.toNanos(2),
+            )
+
+        tracker.onStart(context, span)
+
+        assertThat(AppStartSpans.current).isSameAs(span)
+    }
+
+    private fun appStartSpan(
+        spanId: String,
+        hasEnded: Boolean = false,
+        latencyNanos: Long = TimeUnit.MILLISECONDS.toNanos(500),
+    ): ReadWriteSpan {
         val span = mockk<ReadWriteSpan>()
         every { span.name } returns RumConstants.APP_START_SPAN_NAME
         every { span.spanContext } returns spanContext(spanId)
+        every { span.hasEnded() } returns hasEnded
+        every { span.latencyNanos } returns latencyNanos
         return span
     }
 
-    private fun endedSpan(
-        name: String,
-        spanId: String,
-    ): ReadableSpan {
+    private fun endedSpan(spanId: String): ReadableSpan {
         val span = mockk<ReadableSpan>()
-        every { span.name } returns name
         every { span.spanContext } returns spanContext(spanId)
         return span
     }

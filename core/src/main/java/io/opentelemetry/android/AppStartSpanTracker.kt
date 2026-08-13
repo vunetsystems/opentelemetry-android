@@ -20,11 +20,6 @@ import io.opentelemetry.sdk.trace.SpanProcessor
  * the cold-start span, while `ActivityTracer` opens the warm and hot ones. A
  * processor sees all three, so returning from the background behaves the same as a
  * fresh launch without either class knowing this exists.
- *
- * The end hook compares span contexts rather than clearing unconditionally: two
- * `app.start` spans can legitimately overlap (a warm start beginning while a
- * previous span is closing), and clearing on the wrong one would blind wrappers for
- * the rest of the live span's window.
  */
 internal class AppStartSpanTracker : SpanProcessor {
     override fun onStart(
@@ -32,19 +27,18 @@ internal class AppStartSpanTracker : SpanProcessor {
         span: ReadWriteSpan,
     ) {
         if (span.name == RumConstants.APP_START_SPAN_NAME) {
-            AppStartSpans.current = span
+            AppStartSpans.publish(span)
         }
     }
 
     override fun isStartRequired(): Boolean = true
 
     override fun onEnd(span: ReadableSpan) {
-        if (span.name != RumConstants.APP_START_SPAN_NAME) {
-            return
-        }
-        if (AppStartSpans.current?.spanContext == span.spanContext) {
-            AppStartSpans.current = null
-        }
+        // Deliberately no name check: only an app.start span is ever published, so a
+        // span-context match already implies the name matched. ReadableSpan.getName()
+        // is synchronized on the span's monitor, and this runs for every span the app
+        // emits — getSpanContext() reads a final field and does not lock.
+        AppStartSpans.clearIfTracked(span.spanContext)
     }
 
     override fun isEndRequired(): Boolean = true
