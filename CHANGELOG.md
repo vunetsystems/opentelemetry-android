@@ -20,14 +20,27 @@
   |-----|-----|
   | `start.type` (attribute) | `app.start.type` |
   | `app.process.creation` | `app.start.phase.process` |
-  | `app.attach_base_context.end` | `app.start.phase.runtime_init` |
-  | `applicationCreated` | `app.start.phase.application` |
-  | `app.content_providers.end` | `app.start.phase.extensions` |
-  | `applicationPostCreated` | `app.start.phase.ui_ready` |
+  | `app.attach_base_context.start` | `app.start.phase.attach_base_context.start` |
+  | `app.attach_base_context.end` | `app.start.phase.attach_base_context.end` |
+  | `app.content_providers.start` | `app.start.phase.content_providers.start` |
+  | `app.content_providers.end` | `app.start.phase.content_providers.end` |
+  | `applicationCreated` | `app.start.phase.sdk_init` |
+  | `applicationPostCreated` | `app.start.phase.first_activity` |
   | `ttid` | `app.start.phase.initial_display` |
 
-  The `app.attach_base_context.start` and `app.content_providers.start` boundary markers keep
-  their names: the canonical phase model defines a milestone only at the end of each phase.
+  Every startup milestone now lives under `app.start.phase.*`, and the two phases that report
+  both a boundary and an end keep them under one shared prefix
+  (`app.start.phase.attach_base_context.*`, `app.start.phase.content_providers.*`) so a duration
+  query can pair them by stripping `.start` / `.end`.
+
+  Each name describes the probe it is taken from rather than a generic startup phase:
+  `attach_base_context.end` is the first `Application` callback completing (the ART runtime is
+  already up well before it), `content_providers.end` is the end of ContentProvider init,
+  `sdk_init` is the instant the OTel SDK finished initialising partway through
+  `Application.onCreate()`, and `first_activity` is the first `onActivityPreCreated` — which
+  fires before `Activity.onCreate`, layout, or first paint. First paint is
+  `app.start.phase.initial_display`.
+
   `RumConstants.START_TYPE_KEY` and the `AppStartupTimer.EVENT_*` constants keep their identifiers,
   so this changes the emitted wire keys only and is source- and binary-compatible for callers.
 

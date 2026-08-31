@@ -23,15 +23,24 @@ This instrumentation produces the following telemetry:
 * Resource (trace export): the **first cold** `app.start` span includes the full OTLP resource block
   (`device.*`, `os.*`, `app.installation.id`, `service.*`, etc.). All other trace spans carry a
   minimal resource (`service.name` only). Logs and metrics always use the full resource.
-* Span events (cold start): `app.start.phase.process`, `app.attach_base_context.start`,
-  `app.start.phase.runtime_init` (require [startup-agent](../startup/README.md) and a declared
-  `attachBaseContext` override on your `Application` subclass), `app.content_providers.start`,
-  `app.start.phase.extensions`, `app.start.phase.application`, `app.start.phase.ui_ready`,
+* Span events (cold start): `app.start.phase.process`,
+  `app.start.phase.attach_base_context.start` / `.end` (require
+  [startup-agent](../startup/README.md) and a declared `attachBaseContext` override on your
+  `Application` subclass), `app.start.phase.content_providers.start` / `.end`,
+  `app.start.phase.sdk_init`, `app.start.phase.first_activity`,
   `app.start.phase.initial_display`
 
-  The `app.start.phase.*` names are the canonical startup-phase milestones. The two
-  `*.start` boundary markers keep their original names because the canonical phase model
-  defines a milestone only at the *end* of each phase.
+  Each name describes the probe it is taken from, not a generic phase:
+  * `attach_base_context.end` — the first `Application` callback completing. The ART runtime is
+    already running well before this, so it is not a runtime-init marker.
+  * `content_providers.end` — end of the ContentProvider init phase.
+  * `sdk_init` — the OTel SDK finished initialising, partway through `Application.onCreate()`.
+    Not the end of that callback.
+  * `first_activity` — the first `onActivityPreCreated`. It fires *before* `Activity.onCreate`,
+    layout, and first paint; first paint is `app.start.phase.initial_display`.
+
+  The two phases that report both a boundary and an end keep them under one shared prefix, so a
+  duration query can pair them by stripping `.start` / `.end`.
 
 ### Activity state change
 
