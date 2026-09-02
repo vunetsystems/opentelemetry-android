@@ -6,10 +6,12 @@
 package io.opentelemetry.android.instrumentation.anr
 
 import android.os.Handler
+import io.opentelemetry.android.common.RumConstants
+import io.opentelemetry.android.common.RumDiagnostics
 import io.opentelemetry.android.common.internal.utils.threadIdCompat
 import io.opentelemetry.android.instrumentation.common.EventAttributesExtractor
 import io.opentelemetry.api.common.Attributes
-import io.opentelemetry.api.logs.Logger
+import io.opentelemetry.api.trace.Tracer
 import io.opentelemetry.context.Context
 import io.opentelemetry.semconv.ExceptionAttributes.EXCEPTION_STACKTRACE
 import io.opentelemetry.semconv.incubating.ThreadIncubatingAttributes.THREAD_ID
@@ -31,23 +33,23 @@ internal val DEFAULT_POLL_DURATION_NS = SECONDS.toNanos(1)
 internal class AnrWatcher(
     private val uiHandler: Handler,
     private val mainThread: Thread,
-    private val anrLogger: Logger,
+    private val anrTracer: Tracer,
     private val additionalExtractors: List<EventAttributesExtractor<Array<StackTraceElement>>>,
     private val pollDurationNs: Long = DEFAULT_POLL_DURATION_NS,
 ) : Runnable {
     private val anrCounter = AtomicInteger()
 
-    constructor(uiHandler: Handler, mainThread: Thread, anrLogger: Logger) :
-        this(uiHandler, mainThread, anrLogger, emptyList(), DEFAULT_POLL_DURATION_NS)
+    constructor(uiHandler: Handler, mainThread: Thread, anrTracer: Tracer) :
+        this(uiHandler, mainThread, anrTracer, emptyList(), DEFAULT_POLL_DURATION_NS)
 
     // A constructor that can be called from Java
     constructor(
         uiHandler: Handler,
         mainThread: Thread,
-        anrLogger: Logger,
+        anrTracer: Tracer,
         additionalExtractors: List<EventAttributesExtractor<Array<StackTraceElement>>>,
     ) :
-        this(uiHandler, mainThread, anrLogger, additionalExtractors, DEFAULT_POLL_DURATION_NS)
+        this(uiHandler, mainThread, anrTracer, additionalExtractors, DEFAULT_POLL_DURATION_NS)
 
     override fun run() {
         val response = CountDownLatch(1)
@@ -67,6 +69,7 @@ internal class AnrWatcher(
         }
         if (anrCounter.incrementAndGet() >= 5) {
             val stackTrace = mainThread.stackTrace
+            RumDiagnostics.d { "anr: detected thread=${mainThread.name}" }
             emitAnrEvent(stackTrace)
             // only report once per 5s.
             anrCounter.set(0)
@@ -79,20 +82,21 @@ internal class AnrWatcher(
         val attributesBuilder =
             Attributes
                 .builder()
+                .put(RumConstants.ERROR_RUNTIME_KEY, RumConstants.ERROR_RUNTIME_JVM)
                 .put(THREAD_ID, id)
                 .put(THREAD_NAME, mainThread.name)
                 .put(EXCEPTION_STACKTRACE, stackTraceToString(stackTrace))
 
+        // Extractors run after this write and may replace error.runtime; that is the
+        // supported in-process override for a wrapper that still goes through this reporter.
         for (extractor in additionalExtractors) {
             val extractedAttributes = extractor.extract(Context.current(), stackTrace)
             attributesBuilder.putAll(extractedAttributes)
         }
 
-        val eventBuilder = anrLogger.logRecordBuilder()
-        eventBuilder
-            .setEventName("device.anr")
-            .setAllAttributes(attributesBuilder.build())
-            .emit()
+        val tracerBuilder = anrTracer.spanBuilder("device.anr").setAllAttributes(attributesBuilder.build())
+        tracerBuilder.startSpan().end()
+
     }
 
     private fun stackTraceToString(stackTrace: Array<StackTraceElement>): String {

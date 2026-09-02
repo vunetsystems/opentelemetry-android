@@ -2,6 +2,247 @@
 
 ## Unreleased
 
+### Added
+
+- Navigation attribution: `ui.navigation` spans include three new attributes across all three
+  navigators (View, Compose Nav2, Compose Nav3).
+  - `navigation.is_initial` — `true` on the **first `ui.navigation` span emitted in the process**,
+    not necessarily the first screen the user sees. In a single-Activity app the host Activity's
+    transition is emitted before the first Fragment or Compose destination, so `is_initial=true`
+    marks the host shell rather than the content screen; read it as "start of this process's
+    navigation history", and pair it with `navigation.destination.*` if you need the visible screen.
+    It is a deliberate proxy rather than a correlation against `app.start.type`, which would require
+    navigation-common to depend on the activity/startup instrumentation.
+  - `navigation.stack_depth.before` / `.after` — the navigator's tracked stack depth. Absent, rather
+    than zero, where the framework has no depth to report: Activity transitions have no back-stack
+    concept, so only Fragment and Compose transitions carry these. What "depth" counts is
+    framework-specific — Nav3 reports true back-stack sizes, while Nav2 reports its own shadow stack,
+    which *retains* the destination it returned to on a pop, so a pop never unwinds past that entry.
+    The delta is how many entries were dropped, not always one: a one-level pop is 3 → 2, while
+    returning to an ancestor unwinds everything above it in a single transition (3 → 1). Fragment
+    transitions report
+    `FragmentManager.getBackStackEntryCount()`, which counts transactions committed with
+    `addToBackStack()` rather than visible fragments — an app that navigates with a plain
+    `replace().commit()` reports `0 → 0` for a real transition. All three navigators emit under the
+    same instrumentation scope, so the span itself does not say which of these applies; interpret
+    the depth against the navigator the screen uses rather than comparing across them.
+  - `navigation.trigger` gains the value `user_tap`, reported when a navigation happens inside a
+    live click-interaction window. Resolved by the span emitter, since the collectors cannot see the
+    interaction context. It replaces two of the three collector-assigned triggers:
+    - `unknown` — a forward transition (push/replace) that happened while a tap was live.
+    - `programmatic` — only ever produced for a pop with no recorded back press, which inside a
+      click window is a tap-driven pop such as a toolbar "up" or a "close" button. The pop is still
+      recorded by `navigation.transition.type`, so nothing is lost by naming the trigger.
+
+    `back_press` is never replaced: a system back press is the more specific fact even if a tap was
+    live. **Note for existing consumers:** a tap-driven pop that previously reported `programmatic`
+    now reports `user_tap`, so queries that counted `programmatic` as "code-driven navigation" will
+    see those move. Known limit: the click window is not consumed by the first navigation that uses
+    it, so a genuinely programmatic navigation landing inside the window of an unrelated tap is also
+    labelled `user_tap`.
+
+  Known vocabulary gap: `back_gesture` (predictive back vs. plain back press) is not yet
+  distinguished — it needs an `OnBackAnimationCallback` integration (API 33+). Also still deferred,
+  as they require the navigation span to stop ending synchronously and instead wait for the
+  destination to render: `navigation.duration_ms`, `navigation.ttid_ms`,
+  `navigation.transition.completed`, and `navigation.is_cancelled`.
+
+  `NavigationTransitionCandidate` gained two optional constructor parameters, so its generated JVM
+  constructor and `copy` signatures changed: the old 5-argument `<init>` is gone, replaced by a
+  7-argument one plus the synthetic defaults overload. Kotlin callers are source-compatible; Java
+  callers that constructed it with 5 arguments would be a binary break. This is accepted rather than
+  papered over with `@JvmOverloads` because the type is Kotlin-only in practice — navigation-common
+  is an `implementation` dependency of every navigation module, so it is not on any consumer's
+  compile classpath, and the only constructors are the three collectors in this repo.
+
+- Canonical UI-host lifecycle attributes: `activity.lifecycle` and `fragment.lifecycle` spans now
+  also carry `ui.host.kind` (`activity` / `fragment`), `ui.host.name`, and
+  `ui.host.lifecycle.event`. Canonical models Activity, Fragment and the iOS hosts as one
+  `ui.host.*` shape, so a single cross-platform query can read lifecycle data without knowing which
+  attribute holds the host identity on each platform, and `ui.host.kind` gives a host filter that
+  previously did not exist (the concept was split across two span types).
+
+  **Purely additive** — the span names are unchanged and every existing attribute
+  (`activity.name`, `fragment.name`, `activity.lifecycle.event`, `fragment.lifecycle.event`) is
+  still emitted, so existing queries and `app.action.summary` output are unaffected.
+
+  One value-space difference to be aware of: `ui.host.name` carries the identical value to
+  `activity.name` / `fragment.name`, but `ui.host.lifecycle.event` is **snake_case**
+  (`view_destroyed`) where the superseded keys keep the PascalCase Android callback names
+  (`ViewDestroyed`). That normalisation is the point — iOS already emits snake_case, so folding case
+  per platform is exactly what the canonical key removes. Both values appear on the same span.
+
+  Note `ui.*` is a deliberate extension: OpenTelemetry semantic conventions do not define a
+  `ui.host.*` namespace, so these names are non-standard by choice.
+- OkHttp network phase timing (incubating): DNS, connect, TLS, TTFB, download, and total durations exported as `http.client.timing.*` span attributes and `http.*` span events when `captureNetworkTimingPhases` is enabled (default).
+- HttpURLConnection total request timing (incubating): `http.client.timing.total_ms` and `http.call` span event when `captureNetworkTiming` is enabled (default); `http.client.timing.phases_supported=false` (use OkHttp for phase breakdown).
+- HTTP error taxonomy: OkHttp and HttpURLConnection failed spans include `http.error.category` (`timeout`, `dns`, `ssl`, `io`, `http_client`, `unknown`) alongside existing `error.type`.
+- Network monitoring: `network.connection.metered` boolean on spans and `network.change` events when the active network is known (replaces legacy `net.host.connection.metered`).
+- Image-load target attribution: Glide and Coil `image.load` spans include `image.target.view_id` (resource entry name; `no-id` for views without an `android:id`, `unresolved` for runtime `View.generateViewId()` ids that have no resource-table entry) and `image.target.view_type` when the request has a view-backed target, so a failing image can be traced to a specific widget rather than only to `screen.name`. Compose call sites (`AsyncImage`, `GlideImage`) have no backing `View` and omit both.
+- Hybrid-click gesture attribution: `ui.interaction` spans include `interaction.type`, the canonical
+  discriminator naming the gesture that produced the span. Values are `tap` and `long_press`, split
+  by press duration against `ViewConfiguration.getLongPressTimeout()`. The attribute describes the
+  user's gesture rather than what the app did with it: a slow press on a target with no long-click
+  handler reports `long_press` even though the app handled an ordinary click. Gestures that leave
+  the touch slop are still not reported at all, so span volume is unchanged.
+- Hybrid-click control classification: `ui.interaction` spans include `ui.control.type` (the
+  canonical successor to `app.widget.type`, carrying the identical value — both are emitted) and
+  `ui.control.selection_mode` (`single` for radio/tab/dropdown, `multiple` for switch/checkbox/
+  toggle, omitted for kinds where selection doesn't apply). The selection mode reflects what each
+  widget *kind* means, not per-instance state — a radio button is `single` regardless of whether
+  it's actually grouped with others.
+- Image-load error taxonomy: failed `image.load` spans include the standard semconv `error.type` (fully-qualified class of the failure) as a queryable attribute alongside the existing `recordException` span event, which most back-ends cannot group on. Reusing the semconv key means image failures join the same error breakdowns as the OkHttp and HttpURLConnection instrumentations. Glide reports the first root cause rather than the generic wrapping `GlideException`.
+- Jank type attribution: `app.jank` spans include `app.jank.type` (`slow` or `frozen`). Bucketing is cumulative — a frozen frame exceeds both thresholds and is reported by both spans — so counting `app.jank` spans double-counts frozen frames. Previously the only way to tell the two apart was matching the `app.jank.threshold` float (`0.016` vs `0.7`); this makes it a group-by. Purely additive — no existing attribute changed. Deliberate extension: semconv owns `app.jank.*` but defines only `frame_count`, `period`, and `threshold`. Migrating off deprecated `slowRenders`/`frozenRenders`: those bucket exclusively, so equivalent slow-only frames are `sum(app.jank.frame_count)` where `type="slow"` minus `sum(app.jank.frame_count)` where `type="frozen"` — do not subtract span counts.
+- Fault runtime attribution: `device.crash` and `device.anr` spans include `error.runtime` (`RumConstants.ERROR_RUNTIME_KEY`), always `jvm` from this SDK. A Dart/`FlutterError` or React Native exception rethrown into the Android uncaught handler is still `jvm`. Grouping Flutter/RN faults separately only works if those wrappers emit their own `device.crash` / `device.anr` (or overwrite via `addAttributesExtractor`) using `dart` / `js`. The value space is documented as `jvm` / `dart` / `js` (`ERROR_RUNTIME_JVM`, `ERROR_RUNTIME_DART`, `ERROR_RUNTIME_JS`) so wrappers that emit their own spans can copy the same lowercase runtime names rather than picking their own spelling; the values name the runtime, not the UI framework, which is reported separately as `app.framework`. `error.runtime` is a deliberate extension — semconv owns `error.*` but defines only `error.type`. Purely additive — no existing attribute changed.
+
+### ⚠️⚠️ Breaking changes
+
+- **`app.metrics` no longer carries its data on a span event — this is not a rename, and a
+  rename-style fix does not apply.** All 16 metric attributes (`process.cpu.usage`,
+  `process.memory.*`, `process.thread.count`, `system.memory.*`, `battery.percent`,
+  `system.battery.temperature`, `storage.free`, `system.disk.total`, etc.) move from the
+  `"app.metrics"` **event** attached to the `app.metrics` span to direct **attributes on the span
+  itself**. The `"app.metrics"` event is removed entirely, not left empty.
+
+  Every attribute keeps its existing name and value — nothing to search-and-replace. Any
+  dashboard, alert, or query reading these values via `event.attributes` for the `app.metrics`
+  span sees the data disappear, not move under a new key, because it's no longer in that OTLP
+  location at all. Consumers must instead read `span.attributes` directly on the `app.metrics`
+  span. Span name, span kind, and emission timing (default 30s) are unchanged.
+
+  `SystemMetricsSpanEmitter` is `internal`; no public API / `apiCheck` impact.
+
+- `app.metrics` renamed `heap.free` to the canonical `process.memory.heap.free`. `device.crash` and `device.anr` keep `heap.free` unchanged — canonical renames this field in `app.metrics` scope only. Both signals previously emitted through a single shared `RumConstants.HEAP_FREE_KEY`, so `SystemMetricsSpanEmitter` now declares its own key, the same way every non-shared metric there already does; `RumConstants.HEAP_FREE_KEY` is untouched, so the crash reporter and any caller using it are unaffected and the public API is unchanged. `storage.free` and `battery.percent` stay shared, as canonical keeps those identical on both signals. Update dashboards, alerts, and queries reading `heap.free` off `app.metrics`.
+- **`system.memory.total` and `system.disk.total` move from `app.metrics` span attributes to the
+  OTel resource — this is not a rename, and where you read them from is not symmetric with the
+  rest of the resource.** They no longer appear anywhere on `app.metrics` (or any other trace
+  span). Per the existing resource-export rules
+  (`io.opentelemetry.android.export.SelectiveResourceSpanExporter`, unchanged by this release):
+  logs and metrics always carry the full resource, so both keys are present there; traces carry
+  the full resource only on the first cold `app.start` span per process, so that is the only trace
+  span where they now appear. A consumer reading these two values from `app.metrics` must switch
+  to the resource, and a consumer reading them from an arbitrary trace span must switch to
+  filtering for the cold `app.start` span specifically.
+
+  This does not reduce IPC. `system-metrics` still calls `getMemoryInfo()` and `StatFs` on its
+  existing 60-second cache refresh — the totals were fields on those same result objects, never
+  extra calls — so the emitter pays exactly what it paid before. What changes is placement: two
+  static longs stop being repeated on every `app.metrics` sample.
+
+  New unconditional cost: every app now performs one `ActivityManager.getMemoryInfo()` call and one
+  `StatFs` call at SDK-init resource-build time, regardless of whether the opt-in
+  `instrumentation:system-metrics` module is used — these are treated as device facts (same
+  category as `device.manufacturer`), not something gated on which instrumentations are installed,
+  since the resource has no mechanism for late, per-instrumentation attribute append. Both values
+  are memoized after the first successful read, because `AndroidResource.createDefault` runs more
+  than once per SDK init (a field initializer in `OpenTelemetryRumBuilder`, then again in
+  `OpenTelemetryRumInitializer`) and typically on the main thread during `Application.onCreate`,
+  where `StatFs` is a filesystem read that can trip `StrictMode.detectDiskReads`. A failed read is
+  not memoized, so a transient failure can recover on a later build.
+
+  If either value cannot be read it is **omitted** from the resource rather than reported as a
+  sentinel: the resource is immutable for the life of the process, so publishing `-1` would pin it
+  onto every log and metric until the app restarts.
+
+  No public API change: `AndroidResource.createDefault(Context)` keeps its existing signature, and
+  the reader it delegates to is `internal` to `:core`.
+
+- `app.start` attribute and startup-phase span events renamed to the canonical `app.start.*`
+  names. Update dashboards, alerts, and queries keyed on the old names:
+
+  | Old | New |
+  |-----|-----|
+  | `start.type` (attribute) | `app.start.type` |
+  | `app.process.creation` | `app.start.phase.process` |
+  | `app.attach_base_context.start` | `app.start.phase.attach_base_context.start` |
+  | `app.attach_base_context.end` | `app.start.phase.attach_base_context.end` |
+  | `app.content_providers.start` | `app.start.phase.content_providers.start` |
+  | `app.content_providers.end` | `app.start.phase.content_providers.end` |
+  | `applicationCreated` | `app.start.phase.sdk_init` |
+  | `applicationPostCreated` | `app.start.phase.first_activity` |
+  | `ttid` | `app.start.phase.initial_display` |
+
+  Every startup milestone now lives under `app.start.phase.*`, and the two phases that report
+  both a boundary and an end keep them under one shared prefix
+  (`app.start.phase.attach_base_context.*`, `app.start.phase.content_providers.*`) so a duration
+  query can pair them by stripping `.start` / `.end`.
+
+  Each name describes the probe it is taken from rather than a generic startup phase:
+  `attach_base_context.end` is the first `Application` callback completing (the ART runtime is
+  already up well before it), `content_providers.end` is the end of ContentProvider init,
+  `sdk_init` is the instant the OTel SDK finished initialising partway through
+  `Application.onCreate()`, and `first_activity` is the first `onActivityPreCreated` — which
+  fires before `Activity.onCreate`, layout, or first paint. First paint is
+  `app.start.phase.initial_display`.
+
+  `RumConstants.START_TYPE_KEY` and the `AppStartupTimer.EVENT_*` constants keep their identifiers,
+  so this changes the emitted wire keys only and is source- and binary-compatible for callers.
+- **`app.metrics`'s `process.memory.pss` renamed to `process.memory.footprint`, in bytes.**
+  Canonical defines footprint in bytes — the same field iOS feeds from `phys_footprint`, itself
+  bytes — so the conversion ships in this same change rather than being deferred: unlike a rename
+  that reuses an already-populated key, `process.memory.footprint` has no existing readers to
+  protect from a silent 1024× shift, since nobody has ever emitted this key name before. Deferring
+  the conversion would instead have made it wrong from day one for anyone building a new query
+  against the canonical name expecting the canonical unit. `process.memory.pss` (kB) is removed;
+  update dashboards, alerts, and queries keyed on it. `SystemMetricsSpanEmitter` is `internal`, so
+  no `apiCheck`/`apiDump` is affected.
+
+  `MemoryMetricsReader.readPssKb()` is renamed to `readFootprintBytes()`; the kB→bytes
+  multiplication is pulled out as `MemoryMetricsReader.pssKbToBytes` so it's directly
+  unit-testable.
+
+- **`process.memory.native.used` is *not* renamed to `process.memory.resident`, on reflection.**
+  An earlier draft of this change proposed that rename, but the value behind it —
+  `Debug.getNativeHeapAllocatedSize()`, native heap allocated via malloc/JNI — is not resident set
+  size (pages currently mapped into physical RAM); those are different statistics. Shipping the
+  canonical name against the wrong quantity would make any chart comparing it against a real RSS
+  value (e.g. iOS `resident_size`) silently wrong. `process.memory.native.used` stays as-is until
+  this SDK can emit a genuine RSS reading under the canonical name.
+
+- Action summary renamed to the canonical `semantic.summary` (was `app.action.summary`). This is the human-readable span description written by `ActionSummarySpanExporter` (e.g. `App cold start`). Update dashboards, alerts, and queries keyed on the old name. `RumConstants.APP_ACTION_SUMMARY_KEY` keeps its identifier, so this changes the emitted wire key only and is source- and binary-compatible for callers.
+
+- Hybrid-click span renamed from `ui.click` to `ui.interaction`
+  (`RumConstants.UI_INTERACTION_SPAN_NAME`). Update dashboards, alerts, and queries keyed on the
+  old name. Span attributes and the derived summary *value* are unchanged (the attribute carrying
+  that summary is renamed to `semantic.summary` — see the entry above).
+
+- `ui.interaction` toggle-state attribute renamed from `app.widget.checked` to
+  `ui.control.value.checked` (canonical `ui.control.value.*` family). Update dashboards, alerts,
+  and queries keyed on the old name. Internal-only constant identifier unchanged, so this is a
+  wire-key-only change.
+
+- Trace spans no longer repeat full device/OS resource attributes on every export. Only the first
+  cold `app.start` span includes the full OTLP resource block; other trace spans use a minimal
+  resource (`service.name` + SDK defaults). Logs and metrics are unchanged. Query `device.*` /
+  `os.*` on traces via the cold `app.start` span or from logs/metrics resource.
+
+### Fixed
+
+- OkHttp Byte Buddy advice classes (`OkHttpClientAdvice`, `OkHttpCallbackAdvice`) now ship in `okhttp3-library` so woven `OkHttpClient` bytecode resolves them at runtime (fixes `NoClassDefFoundError` on Android).
+- OkHttp client instrumentation logic moved to public `OkHttpSingletons.applyClientInstrumentation` so woven OkHttp bytecode does not invoke private advice helpers (fixes `IllegalAccessError` on Android).
+- Glide image loads that fail with a `null` model (e.g. `Glide.with(view).load(null)`) no longer drop the failure silently; a span is now synthesised with `image.url` and `image.model_type` set to `unknown`.
+
+### ⚠️⚠️ Breaking changes
+
+- Published Maven artifact for startup runtime instrumentation renamed from `startup` to
+  `startup-library` (module layout now mirrors `okhttp3-library` / `okhttp3-agent`). Direct
+  consumers must update coordinates; `startup-agent` is unchanged.
+
+- Removed misleading `app.base_context` span event (it did not measure `attachBaseContext`).
+  Added `app.attach_base_context.start` / `app.attach_base_context.end` events (requires
+  `startup-agent` + Byte Buddy) and `app.content_providers.start` / `app.content_providers.end`
+  events for the ContentProvider phase. Removed legacy `app.init.contentprovider` and
+  `applicationPreCreated` AppStart span events (use `app.content_providers.end` instead).
+  `StartupTimestampProvider.attachBaseContextEpochMs` renamed
+  to `contentProvidersPhaseStartEpochMs`; added `attachBaseContextStartElapsedRealtime` and
+  `attachBaseContextEndElapsedRealtime`.
+
+- Activity and fragment lifecycle spans now use stable span names with an event attribute:
+  - Activity lifecycle: span name `activity.lifecycle`, attribute `activity.lifecycle.event` (`Created`, `Resumed`, `Paused`, `Stopped`, `Destroyed`, `Restarted`)
+  - Fragment lifecycle: span name `fragment.lifecycle`, attribute `fragment.lifecycle.event` (`Created`, `Restored`, `Resumed`, `Paused`, `Stopped`, `Destroyed`, `ViewDestroyed`, `Detached`)
+  - App startup span renamed from `AppStart` to `app.start` (`RumConstants.APP_START_SPAN_NAME`)
+  - Span events (`activityPreCreated`, `fragmentResumed`, etc.) are unchanged
+
 ## Version 1.3.0 (2026-04-22)
 
 ### ⚠️⚠️ Breaking changes

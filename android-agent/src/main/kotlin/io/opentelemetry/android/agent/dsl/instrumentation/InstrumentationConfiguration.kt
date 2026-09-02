@@ -35,6 +35,18 @@ class InstrumentationConfiguration internal constructor(
     private val screenOrientation: ScreenOrientationConfiguration by lazy {
         ScreenOrientationConfiguration(config, instrumentationLoader)
     }
+    private val hybridClick: HybridClickConfiguration by lazy {
+        HybridClickConfiguration(config, instrumentationLoader)
+    }
+    private val systemMetrics: SystemMetricsConfiguration by lazy {
+        SystemMetricsConfiguration(config, instrumentationLoader)
+    }
+    private val glide: GlideConfiguration by lazy {
+        GlideConfiguration(config)
+    }
+    private val coil: CoilConfiguration by lazy {
+        CoilConfiguration(config)
+    }
 
     /**
      * Configures activity lifecycle instrumentation.
@@ -83,5 +95,33 @@ class InstrumentationConfiguration internal constructor(
      */
     fun screenOrientation(configure: ScreenOrientationConfiguration.() -> Unit) {
         screenOrientation.configure()
+    }
+
+    /**
+     * Configures hybrid click instrumentation.
+     */
+    fun hybridClick(configure: HybridClickConfiguration.() -> Unit) {
+        hybridClick.configure()
+    }
+
+    /**
+     * Configures system metrics instrumentation.
+     */
+    fun systemMetrics(configure: SystemMetricsConfiguration.() -> Unit) {
+        systemMetrics.configure()
+    }
+
+    /**
+     * Configures Glide image-loading instrumentation.
+     */
+    fun glide(configure: GlideConfiguration.() -> Unit) {
+        glide.configure()
+    }
+
+    /**
+     * Configures Coil image-loading instrumentation.
+     */
+    fun coil(configure: CoilConfiguration.() -> Unit) {
+        coil.configure()
     }
 }
