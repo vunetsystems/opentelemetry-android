@@ -11,11 +11,17 @@ import android.content.Context
 import android.os.AsyncTask
 import android.util.Log
 import io.opentelemetry.android.AndroidResource.createDefault
+import io.opentelemetry.android.AndroidResource.createMinimal
 import io.opentelemetry.android.common.RumConstants
 import io.opentelemetry.android.config.OtelRumConfig
+import io.opentelemetry.android.export.ActionSummarySpanExporter
 import io.opentelemetry.android.export.BufferDelegatingLogExporter
 import io.opentelemetry.android.export.BufferDelegatingMetricExporter
 import io.opentelemetry.android.export.BufferDelegatingSpanExporter
+import io.opentelemetry.android.export.SelectiveResourceSpanExporter
+import io.opentelemetry.android.common.internal.instrumentation.MarkerSpanExporter
+import io.opentelemetry.android.common.internal.instrumentation.MarkerLogRecordExporter
+import io.opentelemetry.android.common.internal.instrumentation.MarkerMetricExporter
 import io.opentelemetry.android.features.diskbuffering.SignalFromDiskExporter
 import io.opentelemetry.android.features.diskbuffering.SignalFromDiskExporter.Companion.set
 import io.opentelemetry.android.features.diskbuffering.scheduler.DefaultExportScheduleHandler
@@ -118,6 +124,7 @@ class OpenTelemetryRumBuilder internal constructor(
     private var propagatorCustomizer: (TextMapPropagator) -> TextMapPropagator = { it }
 
     private var resource: Resource = createDefault(context)
+    private var minimalTraceResource: Resource = createMinimal(context)
     private var exportScheduleHandler: ExportScheduleHandler? = null
     private var sessionProvider: SessionProvider = SessionProvider.getNoop()
 
@@ -396,8 +403,11 @@ class OpenTelemetryRumBuilder internal constructor(
     ) {
         val diskBufferingConfig = config.getDiskBufferingConfig()
         var spanExporter = buildSpanExporter()
-        var logsExporter = buildLogsExporter()
-        var metricExporter = buildMetricExporter()
+        spanExporter = SelectiveResourceSpanExporter(spanExporter, resource)
+        spanExporter = MarkerSpanExporter(spanExporter)
+        spanExporter = ActionSummarySpanExporter(spanExporter)
+        var logsExporter: LogRecordExporter = MarkerLogRecordExporter(buildLogsExporter())
+        var metricExporter: MetricExporter = MarkerMetricExporter(buildMetricExporter())
         var signalFromDiskExporter: SignalFromDiskExporter? = null
 
         if (diskBufferingConfig.enabled) {
@@ -547,9 +557,14 @@ class OpenTelemetryRumBuilder internal constructor(
         var tracerProviderBuilder =
             SdkTracerProvider
                 .builder()
-                .setResource(resource)
+                .setResource(minimalTraceResource)
                 .setClock(clock)
                 .addSpanProcessor(SessionIdSpanAppender(sessionProvider))
+                // Publishes the in-flight app.start span for wrapper SDKs. Registered
+                // here rather than inside an instrumentation because app.start is
+                // created from several places (cold via AppStartupTimer, warm/hot via
+                // ActivityTracer) and a processor observes all of them.
+                .addSpanProcessor(AppStartSpanTracker())
 
         val batchSpanProcessor = BatchSpanProcessor.builder(spanExporter).build()
         tracerProviderBuilder.addSpanProcessor(batchSpanProcessor)
