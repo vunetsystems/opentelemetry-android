@@ -5,3 +5,7 @@ demo-app/local.properties
 .DS_Store
 **/build/
 .kotlin/
+.vscode/
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/
