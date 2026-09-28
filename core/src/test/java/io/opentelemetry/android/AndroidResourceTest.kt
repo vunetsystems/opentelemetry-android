@@ -227,6 +227,40 @@ internal class AndroidResourceTest {
         )
     }
 
+    /**
+     * `service.name` identifies the app, so it must not follow the device language. The label is
+     * read through a default-locale configuration context; the device-locale string is only a
+     * fallback.
+     */
+    @Test
+    fun `the app label is read from the default locale, not the device locale`() {
+        val defaultLocaleContext = mockk<Context>()
+        every { defaultLocaleContext.getString(appInfo.labelRes) } returns "robotron"
+        every { ctx.applicationContext.createConfigurationContext(any()) } returns defaultLocaleContext
+        every { ctx.applicationContext.getString(appInfo.labelRes) } returns "\u0930\u094b\u092c\u094b\u091f\u094d\u0930\u0949\u0928"
+
+        assertResourceMatches()
+    }
+
+    @Test
+    fun `the device-locale label is used when the default-locale lookup fails`() {
+        every { ctx.applicationContext.createConfigurationContext(any()) } throws
+            SecurityException("cannot create configuration context")
+
+        assertResourceMatches()
+    }
+
+    @Test
+    fun `fall back to the package name when the app has no label at all`() {
+        appInfo = ApplicationInfo().apply { labelRes = 0 }
+        every { ctx.applicationContext.applicationInfo } returns appInfo
+        every { ctx.applicationContext.packageName } returns "com.example.robotron"
+
+        assertResourceMatches(
+            extraAttributes = mapOf(ServiceAttributes.SERVICE_NAME to "com.example.robotron"),
+        )
+    }
+
     @Test
     fun testProblematicContext() {
         every { ctx.applicationContext.applicationInfo } throws SecurityException("cannot do that")

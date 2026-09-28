@@ -7,6 +7,7 @@ package io.opentelemetry.android
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.content.res.Configuration
 import android.os.Build
 import androidx.annotation.VisibleForTesting
 import io.opentelemetry.android.common.RumConstants.APP_FRAMEWORK_KEY
@@ -23,6 +24,7 @@ import io.opentelemetry.semconv.incubating.OsIncubatingAttributes.OS_DESCRIPTION
 import io.opentelemetry.semconv.incubating.OsIncubatingAttributes.OS_NAME
 import io.opentelemetry.semconv.incubating.OsIncubatingAttributes.OS_TYPE
 import io.opentelemetry.semconv.incubating.OsIncubatingAttributes.OS_VERSION
+import java.util.Locale
 import java.util.UUID
 
 private const val SHARED_PREF_FILE = "opentelemetry-android"
@@ -159,18 +161,71 @@ object AndroidResource {
         return installId
     }
 
+    /**
+     * App label, used as `service.name`. Resolved against the app's *default* resource
+     * configuration rather than the device's, so the value does not move when the user switches
+     * the device language: `service.name` identifies the app, and a per-language value splits one
+     * app across several services in the backend.
+     *
+     * Falls back, in order, to the device-locale label (the behaviour before this was made
+     * locale-stable), the non-localized label, and the package name. Every step is
+     * individually non-throwing, so one unreadable candidate does not cost the app its name.
+     */
     private fun readAppName(context: Context): String =
         try {
             val ctx = context.applicationContext
-            val stringId =
-                ctx.applicationInfo.labelRes
-            if (stringId == 0) {
-                ctx.applicationInfo.nonLocalizedLabel.toString()
-            } else {
-                ctx.getString(stringId)
-            }
+            val appInfo = ctx.applicationInfo
+            val labelRes = appInfo.labelRes
+            val label =
+                if (labelRes == 0) {
+                    null
+                } else {
+                    labelInDefaultLocale(ctx, labelRes) ?: labelOrNull(ctx, labelRes)
+                }
+            label
+                ?: appInfo.nonLocalizedLabel?.toString()?.takeIf(String::isNotBlank)
+                ?: ctx.packageName?.takeIf(String::isNotBlank)
+                ?: DEFAULT_APP_NAME
         } catch (_: Exception) {
             DEFAULT_APP_NAME
+        }
+
+    /**
+     * Reads [labelRes] through a context whose configuration carries an undefined locale, which
+     * makes the resource system select the app's unqualified `res/values` string whatever the
+     * device language is. Returns null when the configuration context cannot be created or the
+     * string resolves empty, leaving [readAppName] to fall back.
+     */
+    // AppBundleLocaleChanges guards against asking for a language that Play's language splitting
+    // may not have installed. The opposite is asked for here: an undefined locale selects the
+    // unqualified res/values resources, which are always in the base APK and are never split out.
+    @SuppressLint("AppBundleLocaleChanges")
+    private fun labelInDefaultLocale(
+        ctx: Context,
+        labelRes: Int,
+    ): String? =
+        try {
+            val defaultLocaleConfig =
+                Configuration(ctx.resources.configuration).apply { setLocale(Locale.ROOT) }
+            labelOrNull(ctx.createConfigurationContext(defaultLocaleConfig), labelRes)
+        } catch (_: Exception) {
+            null
+        }
+
+    /**
+     * [labelRes] as [ctx] resolves it, or null when it resolves empty or cannot be read at all — a
+     * stale label id left by a partial upgrade throws
+     * [android.content.res.Resources.NotFoundException], and that has to fall through to the
+     * remaining candidates rather than abandon the name.
+     */
+    private fun labelOrNull(
+        ctx: Context,
+        labelRes: Int,
+    ): String? =
+        try {
+            ctx.getString(labelRes).takeIf(String::isNotBlank)
+        } catch (_: Exception) {
+            null
         }
 
     private fun readAppVersion(context: Context): String? =
